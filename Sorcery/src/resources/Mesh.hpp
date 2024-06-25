@@ -1,8 +1,8 @@
 #pragma once
 
 #include "Resource.hpp"
-#include "../Math.hpp"
 #include "../Bounds.hpp"
+#include "../Math.hpp"
 #include "../rendering/graphics.hpp"
 
 #include <cstdint>
@@ -26,6 +26,21 @@ class Mesh final : public Resource {
   };
 
 public:
+  struct MeshletData {
+    std::uint32_t vert_count;
+    std::uint32_t vert_offset;
+    std::uint32_t prim_count;
+    std::uint32_t prim_offset;
+  };
+
+
+  struct MeshletTriangleIndexData {
+    std::uint32_t idx0 : 10;
+    std::uint32_t idx1 : 10;
+    std::uint32_t idx2 : 10;
+  };
+
+
   struct MaterialSlotInfo {
     std::string name;
   };
@@ -49,6 +64,29 @@ public:
     std::vector<MaterialSlotInfo> material_slots;
     std::vector<SubMeshInfo> sub_meshes;
   };
+
+
+  struct SubmeshData {
+    std::vector<Vector3> positions;
+    std::vector<Vector3> normals;
+    std::vector<Vector3> tangents;
+    std::vector<Vector2> uvs;
+    std::vector<MeshletData> meshlets;
+    std::vector<std::uint8_t> vertex_indices;
+    std::vector<MeshletTriangleIndexData> triangle_indices;
+    std::uint32_t material_idx;
+    bool idx32;
+  };
+
+
+  struct Data2 {
+    std::vector<MaterialSlotInfo> material_slots;
+    std::vector<SubmeshData> submeshes;
+  };
+
+
+  static constexpr std::size_t meshlet_max_verts_{128};
+  static constexpr std::size_t meshlet_max_prims_{256};
 
 private:
   std::unique_ptr<GeometryData> m_cpu_data_{nullptr};

@@ -3,12 +3,15 @@
 #include "../FileIo.hpp"
 #include "../Resources/Mesh.hpp"
 
+#include <DirectXMesh.h>
 #include <assimp/Importer.hpp>
 #include <assimp/postprocess.h>
 #include <assimp/scene.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <limits>
+#include <memory>
 #include <queue>
 #include <ranges>
 
@@ -73,14 +76,14 @@ auto MeshImporter::Import(std::filesystem::path const& src, std::vector<std::byt
     throw std::runtime_error{std::format("Failed to import model at {}: {}.", src.string(), importer.GetErrorString())};
   }
 
-  Mesh::Data meshData;
+  Mesh::Data2 mesh_data;
 
   // Collect all info from aiMaterials
 
-  meshData.material_slots.resize(scene->mNumMaterials);
+  mesh_data.material_slots.resize(scene->mNumMaterials);
 
   for (unsigned i{0}; i < scene->mNumMaterials; i++) {
-    meshData.material_slots[i].name = scene->mMaterials[i]->GetName().C_Str();
+    mesh_data.material_slots[i].name = scene->mMaterials[i]->GetName().C_Str();
   }
 
   // Collect all info from aiMeshes
@@ -90,13 +93,13 @@ auto MeshImporter::Import(std::filesystem::path const& src, std::vector<std::byt
     std::vector<Vector3> normals;
     std::vector<Vector2> uvs;
     std::vector<Vector3> tangents;
-    std::vector<unsigned> indices;
-    unsigned mtlIdx{};
+    std::vector<std::uint32_t> indices;
+    unsigned mtl_idx{};
   };
 
-  // Collected mesh data not yet transformed by node matrices
-  std::vector<MeshProcessingData> meshesUntransformed;
-  meshesUntransformed.reserve(scene->mNumMeshes);
+  // Collected mesh data not yet transformed by node matrices and only containing 32 bit indices
+  std::vector<MeshProcessingData> meshes_untransformed;
+  meshes_untransformed.reserve(scene->mNumMeshes);
 
   for (unsigned i = 0; i < scene->mNumMeshes; i++) {
     // These meshes are always triangle-only, because
@@ -106,7 +109,7 @@ auto MeshImporter::Import(std::filesystem::path const& src, std::vector<std::byt
     // TODO Implement non-triangle rendering support
 
     aiMesh const* const mesh{scene->mMeshes[i]};
-    auto& [vertices, normals, uvs, tangents, indices, mtlIdx]{meshesUntransformed.emplace_back()};
+    auto& [vertices, normals, uvs, tangents, indices, mtlIdx]{meshes_untransformed.emplace_back()};
 
     if (!mesh->HasPositions() || !mesh->HasNormals() || !mesh->HasTextureCoords(0) || !mesh->
         HasTangentsAndBitangents()) {
@@ -137,125 +140,138 @@ auto MeshImporter::Import(std::filesystem::path const& src, std::vector<std::byt
 
   struct MeshTrafoAndIndex {
     Matrix4 trafo;
-    unsigned meshIdx;
+    unsigned mesh_idx;
   };
 
   struct NodeAndAccumTrafo {
-    Matrix4 accumParentTrafo;
+    Matrix4 accum_parent_trafo;
     aiNode const* node;
   };
 
-  std::vector<MeshTrafoAndIndex> meshIndicesWithTrafos;
-  std::queue<NodeAndAccumTrafo> transformQueue;
-  transformQueue.emplace(Matrix4::Identity(), scene->mRootNode);
+  std::vector<MeshTrafoAndIndex> mesh_indices_with_trafos;
+  std::queue<NodeAndAccumTrafo> transform_queue;
+  transform_queue.emplace(Matrix4::Identity(), scene->mRootNode);
 
-  while (!transformQueue.empty()) {
-    auto const& [accumParentTrafo, node] = transformQueue.front();
+  while (!transform_queue.empty()) {
+    auto const& [accumParentTrafo, node] = transform_queue.front();
     auto const trafo{Convert(node->mTransformation).Transpose() * accumParentTrafo};
 
     for (unsigned i = 0; i < node->mNumMeshes; ++i) {
-      meshIndicesWithTrafos.emplace_back(trafo, node->mMeshes[i]);
+      mesh_indices_with_trafos.emplace_back(trafo, node->mMeshes[i]);
     }
 
     for (unsigned i = 0; i < node->mNumChildren; ++i) {
-      transformQueue.emplace(trafo, node->mChildren[i]);
+      transform_queue.emplace(trafo, node->mChildren[i]);
     }
 
-    transformQueue.pop();
+    transform_queue.pop();
   }
 
   // Transform mesh geometry using trafos
 
   // Collected mesh data transformed by node matrices
-  std::vector<MeshProcessingData> meshesTransformed;
+  std::vector<MeshProcessingData> meshes_transformed;
 
-  for (auto const& [trafo, meshIdx] : meshIndicesWithTrafos) {
+  for (auto const& [trafo, meshIdx] : mesh_indices_with_trafos) {
     auto& [vertices, normals, uvs, tangents, indices, mtlIdx]{
-      meshesTransformed.emplace_back(meshesUntransformed[meshIdx])
+      meshes_transformed.emplace_back(meshes_untransformed[meshIdx])
     };
 
-    Matrix4 const trafoInvTransp{trafo.Inverse().Transpose()};
+    Matrix4 const trafo_inv_transp{trafo.Inverse().Transpose()};
 
     for (int i = 0; i < std::ssize(vertices); i++) {
       vertices[i] = Vector3{Vector4{vertices[i], 1} * trafo};
-      normals[i] = Vector3{Vector4{normals[i], 0} * trafoInvTransp};
-      tangents[i] = Vector3{Vector4{tangents[i], 0} * trafoInvTransp};
+      normals[i] = Vector3{Vector4{normals[i], 0} * trafo_inv_transp};
+      tangents[i] = Vector3{Vector4{tangents[i], 0} * trafo_inv_transp};
     }
   }
 
-  // Store geometry data and create submeshes
+  // Generate meshlets and final mesh data
 
-  meshData.sub_meshes.reserve(std::size(meshesTransformed));
-  meshData.indices.emplace<std::vector<std::uint32_t>>();
+  for (auto& [vertices, normals, uvs, tangents, indices, mtlIdx] : meshes_transformed) {
+    // Convert indices to 16 bit if possible to save space
 
-  for (auto const& [vertices, normals, uvs, tangents, indices, mtlIdx] : meshesTransformed) {
-    meshData.sub_meshes.emplace_back(static_cast<int>(std::ssize(meshData.positions)),
-      std::visit([]<typename T>(std::vector<T> const& indices) { return static_cast<int>(std::ssize(indices)); },
-        meshData.indices), static_cast<int>(std::ssize(indices)), static_cast<int>(mtlIdx), AABB{});
+    std::variant<std::vector<std::uint16_t>, std::vector<std::uint32_t>> indices_variant;
 
-    std::ranges::copy(vertices, std::back_inserter(meshData.positions));
-    std::ranges::copy(normals, std::back_inserter(meshData.normals));
-    std::ranges::copy(uvs, std::back_inserter(meshData.uvs));
-    std::ranges::copy(tangents, std::back_inserter(meshData.tangents));
-    std::ranges::copy(indices, std::back_inserter(std::get<std::vector<std::uint32_t>>(meshData.indices)));
-  }
-
-  // Transform indices to 16-bit if possible
-
-  if (auto const& indices32{std::get<std::vector<std::uint32_t>>(meshData.indices)}; std::ranges::all_of(indices32,
-    [](std::uint32_t const idx) {
+    if (std::ranges::all_of(indices, [](std::uint32_t const idx) {
       return idx <= std::numeric_limits<std::uint16_t>::max();
     })) {
-    std::vector<std::uint16_t> indices16;
-    indices16.reserve(std::size(indices32));
+      auto& indices16{indices_variant.emplace<std::vector<std::uint16_t>>()};
+      std::ranges::transform(indices, std::back_inserter(indices16), [](std::uint32_t const idx) {
+        return static_cast<std::uint16_t>(idx);
+      });
+    } else {
+      indices_variant.emplace<std::vector<std::uint32_t>>(std::move(indices));
+    }
 
-    std::ranges::transform(indices32, std::back_inserter(indices16), [](std::uint32_t const idx) {
-      return static_cast<std::uint16_t>(idx);
-    });
+    // Use the final index buffer to generate meshlets
 
-    meshData.indices = std::move(indices16);
+    std::visit(
+      [&vertices, &normals, &uvs, &tangents, mtlIdx, &mesh_data]<typename IndexList>(IndexList const& index_list) {
+        auto const xm_vertices{std::make_unique_for_overwrite<DirectX::XMFLOAT3[]>(vertices.size())};
+        std::ranges::transform(vertices, xm_vertices.get(), [](Vector3 const& vtx) {
+          return DirectX::XMFLOAT3{vtx[0], vtx[1], vtx[2]};
+        });
+
+        std::vector<DirectX::Meshlet> meshlets;
+        std::vector<std::uint8_t> unique_vertex_ib;
+        std::vector<DirectX::MeshletTriangle> primitive_indices;
+
+        DirectX::ComputeMeshlets(index_list.data(), index_list.size() / 3, xm_vertices.get(), vertices.size(), nullptr,
+          meshlets, unique_vertex_ib, primitive_indices, Mesh::meshlet_max_verts_, Mesh::meshlet_max_prims_);
+
+        std::vector<Mesh::MeshletData> meshlet_data;
+        std::ranges::transform(meshlets, std::back_inserter(meshlet_data), [](DirectX::Meshlet const& meshlet) {
+          return Mesh::MeshletData{meshlet.VertCount, meshlet.VertOffset, meshlet.PrimCount, meshlet.PrimOffset};
+        });
+
+        std::vector<Mesh::MeshletTriangleIndexData> triangle_index_data;
+        std::ranges::transform(primitive_indices, std::back_inserter(triangle_index_data),
+          [](DirectX::MeshletTriangle const& tri) { return Mesh::MeshletTriangleIndexData{tri.i0, tri.i1, tri.i2}; });
+
+        mesh_data.submeshes.emplace_back(std::move(vertices), std::move(normals), std::move(tangents), std::move(uvs),
+          std::move(meshlet_data), std::move(unique_vertex_ib), std::move(triangle_index_data), mtlIdx,
+          sizeof(IndexList::value_type) == 4);
+      }, indices_variant);
   }
 
   // Serialize
 
-  SerializeToBinary(std::size(meshData.positions), bytes);
-  std::visit([&bytes]<typename T>(std::vector<T> const& indices) {
-    SerializeToBinary(std::size(indices), bytes);
-  }, meshData.indices);
-  SerializeToBinary(std::ssize(meshData.material_slots), bytes);
-  SerializeToBinary(std::size(meshData.sub_meshes), bytes);
-  SerializeToBinary(static_cast<std::int32_t>(std::holds_alternative<std::vector<std::uint32_t>>(meshData.indices)),
-    bytes);
+  SerializeToBinary(mesh_data.material_slots.size(), bytes);
+  SerializeToBinary(mesh_data.submeshes.size(), bytes);
 
-  auto const posBytes{as_bytes(std::span{meshData.positions})};
-  auto const normBytes{as_bytes(std::span{meshData.normals})};
-  auto const uvBytes{as_bytes(std::span{meshData.uvs})};
-  auto const tanBytes{as_bytes(std::span{meshData.tangents})};
-  auto const idxBytes{
-    std::visit([]<typename T>(std::vector<T> const& indices) {
-      return as_bytes(std::span{indices});
-    }, meshData.indices)
-  };
-
-  bytes.reserve(
-    std::size(bytes) + std::size(posBytes) + std::size(normBytes) + std::size(uvBytes) + std::size(tanBytes) +
-    std::size(idxBytes));
-
-  std::ranges::copy(posBytes, std::back_inserter(bytes));
-  std::ranges::copy(normBytes, std::back_inserter(bytes));
-  std::ranges::copy(uvBytes, std::back_inserter(bytes));
-  std::ranges::copy(tanBytes, std::back_inserter(bytes));
-  std::ranges::copy(idxBytes, std::back_inserter(bytes));
-
-  for (auto const& mtlSlot : meshData.material_slots) {
-    SerializeToBinary(mtlSlot.name, bytes);
+  for (auto const& [name] : mesh_data.material_slots) {
+    SerializeToBinary(name, bytes);
   }
 
-  for (auto const& [baseVertex, firstIndex, indexCount, mtlSlotIdx, bounds] : meshData.sub_meshes) {
-    SerializeToBinary(baseVertex, bytes);
-    SerializeToBinary(firstIndex, bytes);
-    SerializeToBinary(indexCount, bytes);
-    SerializeToBinary(mtlSlotIdx, bytes);
+  for (auto const& [vertices, normals, tangents, uvs, meshlets, vertexIndices, triangleIndices, mtlIdx, idx32] :
+       mesh_data.submeshes) {
+    SerializeToBinary(vertices.size(), bytes);
+    SerializeToBinary(meshlets.size(), bytes);
+    SerializeToBinary(vertexIndices.size(), bytes);
+    SerializeToBinary(triangleIndices.size(), bytes);
+    SerializeToBinary(mtlIdx, bytes);
+    SerializeToBinary(idx32, bytes);
+
+    auto const vtx_bytes{as_bytes(std::span{vertices})};
+    auto const norm_bytes{as_bytes(std::span{normals})};
+    auto const tan_bytes{as_bytes(std::span{tangents})};
+    auto const uv_bytes{as_bytes(std::span{uvs})};
+    auto const meshlets_bytes{as_bytes(std::span{meshlets})};
+    auto const vtx_ib_bytes{as_bytes(std::span{vertexIndices})};
+    auto const tri_bytes{as_bytes(std::span{triangleIndices})};
+
+    bytes.reserve(
+      bytes.size() + vtx_bytes.size() + norm_bytes.size() + tan_bytes.size() + uv_bytes.size() + meshlets_bytes.size() +
+      vtx_ib_bytes.size() + tri_bytes.size());
+
+    std::ranges::copy(vtx_bytes, std::back_inserter(bytes));
+    std::ranges::copy(norm_bytes, std::back_inserter(bytes));
+    std::ranges::copy(tan_bytes, std::back_inserter(bytes));
+    std::ranges::copy(uv_bytes, std::back_inserter(bytes));
+    std::ranges::copy(meshlets_bytes, std::back_inserter(bytes));
+    std::ranges::copy(vtx_ib_bytes, std::back_inserter(bytes));
+    std::ranges::copy(tri_bytes, std::back_inserter(bytes));
   }
 
   categ = ExternalResourceCategory::Mesh;

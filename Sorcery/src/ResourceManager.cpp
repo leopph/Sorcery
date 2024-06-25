@@ -11,6 +11,7 @@
 #include <DirectXTex.h>
 #include <wrl/client.h>
 
+#include <bit>
 #include <cassert>
 #include <iostream>
 #include <ranges>
@@ -179,110 +180,179 @@ auto ResourceManager::LoadTexture(
 
 
 auto ResourceManager::LoadMesh(std::span<std::byte const> const bytes) -> MaybeNull<std::unique_ptr<Resource>> {
-  auto curBytes{as_bytes(std::span{bytes})};
-  std::uint64_t vertexCount;
+  // Read meshletized data
 
-  if (!DeserializeFromBinary(curBytes, vertexCount)) {
+  auto cur_bytes{as_bytes(std::span{bytes})};
+  std::uint64_t mtl_count;
+
+  if (!DeserializeFromBinary(cur_bytes, mtl_count)) {
     return nullptr;
   }
 
-  curBytes = curBytes.subspan(sizeof vertexCount);
-  std::uint64_t idxCount;
+  cur_bytes = cur_bytes.subspan(sizeof mtl_count);
+  std::uint64_t submesh_count;
 
-  if (!DeserializeFromBinary(curBytes, idxCount)) {
+  if (!DeserializeFromBinary(cur_bytes, submesh_count)) {
     return nullptr;
   }
 
-  curBytes = curBytes.subspan(sizeof idxCount);
-  std::uint64_t mtlCount;
+  cur_bytes = cur_bytes.subspan(sizeof submesh_count);
 
-  if (!DeserializeFromBinary(curBytes, mtlCount)) {
-    return nullptr;
-  }
+  Mesh::Data2 mesh_data2;
+  mesh_data2.material_slots.resize(mtl_count);
 
-  curBytes = curBytes.subspan(sizeof mtlCount);
-  std::uint64_t submeshCount;
-
-  if (!DeserializeFromBinary(curBytes, submeshCount)) {
-    return nullptr;
-  }
-
-  curBytes = curBytes.subspan(sizeof submeshCount);
-  std::int32_t idx32;
-
-  if (!DeserializeFromBinary(curBytes, idx32)) {
-    return nullptr;
-  }
-
-  curBytes = curBytes.subspan(sizeof idx32);
-
-  Mesh::Data meshData;
-
-  meshData.positions.resize(vertexCount);
-  std::memcpy(meshData.positions.data(), curBytes.data(), vertexCount * sizeof(Vector3));
-  curBytes = curBytes.subspan(vertexCount * sizeof(Vector3));
-
-  meshData.normals.resize(vertexCount);
-  std::memcpy(meshData.normals.data(), curBytes.data(), vertexCount * sizeof(Vector3));
-  curBytes = curBytes.subspan(vertexCount * sizeof(Vector3));
-
-  meshData.uvs.resize(vertexCount);
-  std::memcpy(meshData.uvs.data(), curBytes.data(), vertexCount * sizeof(Vector2));
-  curBytes = curBytes.subspan(vertexCount * sizeof(Vector2));
-
-  meshData.tangents.resize(vertexCount);
-  std::memcpy(meshData.tangents.data(), curBytes.data(), vertexCount * sizeof(Vector3));
-  curBytes = curBytes.subspan(vertexCount * sizeof(Vector3));
-
-  if (idx32) {
-    meshData.indices.emplace<std::vector<std::uint32_t>>();
-  }
-
-  std::visit([idxCount, &curBytes]<typename T>(std::vector<T>& indices) {
-    indices.resize(idxCount);
-    std::memcpy(indices.data(), curBytes.data(), idxCount * sizeof(T));
-    curBytes = curBytes.subspan(idxCount * sizeof(T));
-  }, meshData.indices);
-
-  meshData.material_slots.resize(mtlCount);
-
-  for (auto i{0ull}; i < mtlCount; i++) {
-    if (!DeserializeFromBinary(curBytes, meshData.material_slots[i].name)) {
+  for (auto i{0ull}; i < mtl_count; i++) {
+    if (!DeserializeFromBinary(cur_bytes, mesh_data2.material_slots[i].name)) {
       return nullptr;
     }
 
-    curBytes = curBytes.subspan(meshData.material_slots[i].name.size() + 8);
+    cur_bytes = cur_bytes.subspan(mesh_data2.material_slots[i].name.size() + 8);
   }
 
-  meshData.sub_meshes.resize(submeshCount);
+  mesh_data2.submeshes.resize(submesh_count);
 
-  for (auto i{0ull}; i < submeshCount; i++) {
-    if (!DeserializeFromBinary(curBytes, meshData.sub_meshes[i].base_vertex)) {
+  for (auto i{0ull}; i < submesh_count; i++) {
+    std::uint64_t vertex_count;
+
+    if (!DeserializeFromBinary(cur_bytes, vertex_count)) {
       return nullptr;
     }
 
-    curBytes = curBytes.subspan(sizeof(int));
+    cur_bytes = cur_bytes.subspan(sizeof vertex_count);
+    std::uint64_t meshlet_count;
 
-    if (!DeserializeFromBinary(curBytes, meshData.sub_meshes[i].first_index)) {
+    if (!DeserializeFromBinary(cur_bytes, meshlet_count)) {
       return nullptr;
     }
 
-    curBytes = curBytes.subspan(sizeof(int));
+    cur_bytes = cur_bytes.subspan(sizeof meshlet_count);
+    std::uint64_t vtx_ib_byte_count;
 
-    if (!DeserializeFromBinary(curBytes, meshData.sub_meshes[i].index_count)) {
+    if (!DeserializeFromBinary(cur_bytes, vtx_ib_byte_count)) {
       return nullptr;
     }
 
-    curBytes = curBytes.subspan(sizeof(int));
+    cur_bytes = cur_bytes.subspan(sizeof vtx_ib_byte_count);
+    std::uint64_t tri_index_count;
 
-    if (!DeserializeFromBinary(curBytes, meshData.sub_meshes[i].material_index)) {
+    if (!DeserializeFromBinary(cur_bytes, tri_index_count)) {
       return nullptr;
     }
 
-    curBytes = curBytes.subspan(sizeof(int));
+    cur_bytes = cur_bytes.subspan(sizeof tri_index_count);
+    std::uint32_t mtl_idx;
+
+    if (!DeserializeFromBinary(cur_bytes, mtl_idx)) {
+      return nullptr;
+    }
+
+    cur_bytes = cur_bytes.subspan(sizeof mtl_idx);
+    bool idx32;
+
+    if (!DeserializeFromBinary(cur_bytes, idx32)) {
+      return nullptr;
+    }
+
+    cur_bytes = cur_bytes.subspan(sizeof idx32);
+
+    mesh_data2.submeshes[i].positions.resize(vertex_count);
+    std::memcpy(mesh_data2.submeshes[i].positions.data(), cur_bytes.data(), vertex_count * sizeof(Vector3));
+    cur_bytes = cur_bytes.subspan(vertex_count * sizeof(Vector3));
+
+    mesh_data2.submeshes[i].normals.resize(vertex_count);
+    std::memcpy(mesh_data2.submeshes[i].normals.data(), cur_bytes.data(), vertex_count * sizeof(Vector3));
+    cur_bytes = cur_bytes.subspan(vertex_count * sizeof(Vector3));
+
+    mesh_data2.submeshes[i].tangents.resize(vertex_count);
+    std::memcpy(mesh_data2.submeshes[i].tangents.data(), cur_bytes.data(), vertex_count * sizeof(Vector3));
+    cur_bytes = cur_bytes.subspan(vertex_count * sizeof(Vector3));
+
+    mesh_data2.submeshes[i].uvs.resize(vertex_count);
+    std::memcpy(mesh_data2.submeshes[i].uvs.data(), cur_bytes.data(), vertex_count * sizeof(Vector2));
+    cur_bytes = cur_bytes.subspan(vertex_count * sizeof(Vector2));
+
+    mesh_data2.submeshes[i].meshlets.resize(meshlet_count);
+    std::memcpy(mesh_data2.submeshes[i].meshlets.data(), cur_bytes.data(), meshlet_count * sizeof(Mesh::MeshletData));
+    cur_bytes = cur_bytes.subspan(meshlet_count * sizeof(Mesh::MeshletData));
+
+    mesh_data2.submeshes[i].vertex_indices.resize(vtx_ib_byte_count);
+    std::memcpy(mesh_data2.submeshes[i].vertex_indices.data(), cur_bytes.data(), vtx_ib_byte_count);
+    cur_bytes = cur_bytes.subspan(vtx_ib_byte_count);
+
+    mesh_data2.submeshes[i].triangle_indices.resize(tri_index_count);
+    std::memcpy(mesh_data2.submeshes[i].triangle_indices.data(), cur_bytes.data(),
+      tri_index_count * sizeof(Mesh::MeshletTriangleIndexData));
+    cur_bytes = cur_bytes.subspan(tri_index_count * sizeof(Mesh::MeshletTriangleIndexData));
+
+    mesh_data2.submeshes[i].material_idx = mtl_idx;
+    mesh_data2.submeshes[i].idx32 = idx32;
   }
 
-  return Create<Mesh>(std::move(meshData));
+  // Flatten meshletized data TODO do this only when mesh shaders aren't supported
+
+  Mesh::Data mesh_data;
+  mesh_data.material_slots = std::move(mesh_data2.material_slots);
+  mesh_data.indices.emplace<std::vector<std::uint32_t>>();
+
+  for (auto& [positions, normals, tangents, uvs, meshlets, vertex_indices, triangle_indices, material_idx, idx32] :
+       mesh_data2.submeshes) {
+    // Flatten indices
+
+    std::vector<std::uint32_t> indices;
+
+    std::variant<std::uint16_t const*, std::uint32_t const*> vtx_index_list_ptr_variant;
+    if (idx32) {
+      // 32 bit indices
+      vtx_index_list_ptr_variant.emplace<std::uint32_t const*>(
+        std::bit_cast<std::uint32_t const*>(vertex_indices.data()));
+    } else {
+      // 16 bit indices
+      vtx_index_list_ptr_variant.emplace<std::uint16_t const*>(
+        std::bit_cast<std::uint16_t const*>(vertex_indices.data()));
+    }
+
+    std::visit([&meshlets, &triangle_indices, &indices](auto const vtx_index_list_ptr) {
+      for (auto const& [vert_count, vert_offset, prim_count, prim_offset] : meshlets) {
+        for (std::size_t i{0}; i < prim_count; i++) {
+          auto const& [idx0, idx1, idx2]{triangle_indices[prim_offset + i]};
+
+          indices.emplace_back(static_cast<std::uint32_t>(vtx_index_list_ptr[vert_offset + idx0]));
+          indices.emplace_back(static_cast<std::uint32_t>(vtx_index_list_ptr[vert_offset + idx1]));
+          indices.emplace_back(static_cast<std::uint32_t>(vtx_index_list_ptr[vert_offset + idx2]));
+        }
+      }
+    }, vtx_index_list_ptr_variant);
+
+    // Store data in DrawIndexedInstanced-compatible format
+
+    mesh_data.sub_meshes.emplace_back(static_cast<int>(mesh_data.positions.size()),
+      std::visit([]<typename T>(std::vector<T> const& index_list) { return static_cast<int>(index_list.size()); },
+        mesh_data.indices), static_cast<int>(indices.size()), static_cast<int>(material_idx), AABB{});
+
+    std::ranges::copy(positions, std::back_inserter(mesh_data.positions));
+    std::ranges::copy(normals, std::back_inserter(mesh_data.normals));
+    std::ranges::copy(uvs, std::back_inserter(mesh_data.uvs));
+    std::ranges::copy(tangents, std::back_inserter(mesh_data.tangents));
+    std::ranges::copy(indices, std::back_inserter(std::get<std::vector<std::uint32_t>>(mesh_data.indices)));
+  }
+
+  // Transform indices to 16-bit if possible
+
+  if (auto const& indices32{std::get<std::vector<std::uint32_t>>(mesh_data.indices)}; std::ranges::all_of(indices32,
+    [](std::uint32_t const idx) {
+      return idx <= std::numeric_limits<std::uint16_t>::max();
+    })) {
+    std::vector<std::uint16_t> indices16;
+    indices16.reserve(indices32.size());
+
+    std::ranges::transform(indices32, std::back_inserter(indices16), [](std::uint32_t const idx) {
+      return static_cast<std::uint16_t>(idx);
+    });
+
+    mesh_data.indices = std::move(indices16);
+  }
+
+  return Create<Mesh>(std::move(mesh_data));
 }
 
 

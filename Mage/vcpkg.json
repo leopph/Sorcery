@@ -34,6 +34,10 @@
     {
       "name": "assimp",
       "version>=": "5.2.5"
+    },
+    {
+      "name": "directxmesh",
+      "features": [ "dx12", "spectre" ]
     }
   ]
 }
