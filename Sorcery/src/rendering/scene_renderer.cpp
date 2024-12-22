@@ -23,6 +23,8 @@
 #include "shaders/generated/Debug/depth_resolve_cs.h"
 #include "shaders/generated/Debug/gizmos_line_vs.h"
 #include "shaders/generated/Debug/gizmos_ps.h"
+#include "shaders/generated/Debug/irradiance_ps.h"
+#include "shaders/generated/Debug/irradiance_vs.h"
 #include "shaders/generated/Debug/object_pbr_ps.h"
 #include "shaders/generated/Debug/object_pbr_vs.h"
 #include "shaders/generated/Debug/post_process_ps.h"
@@ -41,6 +43,8 @@
 #include "shaders/generated/Release/depth_resolve_cs.h"
 #include "shaders/generated/Release/gizmos_line_vs.h"
 #include "shaders/generated/Release/gizmos_ps.h"
+#include "shaders/generated/Release/irradiance_ps.h"
+#include "shaders/generated/Release/irradiance_vs.h"
 #include "shaders/generated/Release/object_pbr_ps.h"
 #include "shaders/generated/Release/object_pbr_vs.h"
 #include "shaders/generated/Release/post_process_ps.h"
@@ -679,6 +683,11 @@ auto SceneRenderer::RecreatePipelines() -> void {
     D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF
   };
 
+  CD3DX12_RASTERIZER_DESC const skybox_rasterizer_desc{
+    D3D12_FILL_MODE_SOLID, D3D12_CULL_MODE_FRONT, FALSE, D3D12_DEFAULT_DEPTH_BIAS, D3D12_DEFAULT_DEPTH_BIAS_CLAMP,
+    D3D12_DEFAULT_SLOPE_SCALED_DEPTH_BIAS, TRUE, TRUE, FALSE, 0, {}
+  };
+
   DXGI_SAMPLE_DESC const msaa_sample_desc{static_cast<UINT>(msaa_mode_), 0};
   CD3DX12_RT_FORMAT_ARRAY const render_target_format{D3D12_RT_FORMAT_ARRAY{{render_target_format_}, 1}};
   CD3DX12_RT_FORMAT_ARRAY const color_format{D3D12_RT_FORMAT_ARRAY{{color_buffer_format_}, 1}};
@@ -708,6 +717,15 @@ auto SceneRenderer::RecreatePipelines() -> void {
   };
 
   depth_resolve_pso_ = device_->CreatePipelineState(depth_resolve_pso_desc, sizeof(DepthResolveDrawParams) / 4);
+
+  graphics::PipelineDesc const irradiance_pso_desc{
+    .vs = CD3DX12_SHADER_BYTECODE{g_irradiance_vs_bytes, ARRAYSIZE(g_irradiance_vs_bytes)},
+    .ps = CD3DX12_SHADER_BYTECODE{g_irradiance_ps_bytes, ARRAYSIZE(g_irradiance_ps_bytes)},
+    .depth_stencil_state = disabled_depth_stencil, .rasterizer_state = skybox_rasterizer_desc,
+    .rt_formats = CD3DX12_RT_FORMAT_ARRAY{D3D12_RT_FORMAT_ARRAY{{irradiance_map_format_}, 1}},
+  };
+
+  irradiance_pso_ = device_->CreatePipelineState(irradiance_pso_desc, sizeof(IrradianceDrawParams) / 4);
 
   graphics::PipelineDesc const line_gizmo_pso_desc{
     .primitive_topology_type = D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE,
@@ -747,15 +765,9 @@ auto SceneRenderer::RecreatePipelines() -> void {
   graphics::PipelineDesc const skybox_pso_desc{
     .vs = CD3DX12_SHADER_BYTECODE{&g_skybox_vs_bytes, ARRAYSIZE(g_skybox_vs_bytes)},
     .ps = CD3DX12_SHADER_BYTECODE{&g_skybox_ps_bytes, ARRAYSIZE(g_skybox_ps_bytes)},
-    .depth_stencil_state = CD3DX12_DEPTH_STENCIL_DESC1{
-      TRUE, D3D12_DEPTH_WRITE_MASK_ZERO, D3D12_COMPARISON_FUNC_GREATER_EQUAL, FALSE, {}, {}, {}, {}, {}, {}, {}, {}, {},
-      {}, FALSE
-    },
+    .depth_stencil_state = reverse_z_depth_stencil_read,
     .ds_format = depth_format_,
-    .rasterizer_state = CD3DX12_RASTERIZER_DESC{
-      D3D12_FILL_MODE_SOLID, D3D12_CULL_MODE_FRONT, FALSE, D3D12_DEFAULT_DEPTH_BIAS, D3D12_DEFAULT_DEPTH_BIAS_CLAMP,
-      D3D12_DEFAULT_SLOPE_SCALED_DEPTH_BIAS, TRUE, TRUE, FALSE, 0, {}
-    },
+    .rasterizer_state = skybox_rasterizer_desc,
     .rt_formats = color_format, .sample_desc = msaa_sample_desc
   };
 
@@ -1279,6 +1291,8 @@ auto SceneRenderer::ExtractCurrentState() -> void {
 
   packet.background_color = {0, 0, 0, 1};
   packet.skybox_cubemap = nullptr;
+  packet.irradiance_tex = nullptr;
+  packet.draw_irradiance_map = false;
 
   if (auto const active_scene{Scene::GetActiveScene()}) {
     packet.ambient_light = active_scene->GetAmbientLightVector();
@@ -1291,6 +1305,22 @@ auto SceneRenderer::ExtractCurrentState() -> void {
     if (active_scene->GetSkyMode() == SkyMode::Skybox) {
       if (auto const cubemap{active_scene->GetSkybox()}) {
         packet.skybox_cubemap = cubemap->GetTex();
+
+        if (!irradiance_rt_ || irradiance_src_guid_ != cubemap->GetGuid()) {
+          irradiance_rt_ = RenderTarget::New(*device_, RenderTarget::Desc{
+            .width = cubemap->GetTex()->GetDesc().width,
+            .height = cubemap->GetTex()->GetDesc().height,
+            .color_format = irradiance_map_format_,
+            .debug_name = L"Irradiance RT",
+            .dimension = graphics::TextureDimension::kCube,
+            .depth_or_array_size = 6
+          });
+
+          irradiance_src_guid_ = cubemap->GetGuid();
+          packet.draw_irradiance_map = true;
+        }
+
+        packet.irradiance_tex = irradiance_rt_->GetColorTex();
       }
     }
   }
@@ -1298,6 +1328,7 @@ auto SceneRenderer::ExtractCurrentState() -> void {
   packet.shadow_pso = shadow_pso_;
   packet.depth_normal_pso = depth_normal_pso_;
   packet.depth_resolve_pso = depth_resolve_pso_;
+  packet.irradiance_pso = irradiance_pso_;
   packet.line_gizmo_pso = line_gizmo_pso_;
   packet.object_pso_depth_write = object_pso_depth_write_;
   packet.object_pso_depth_read = object_pso_depth_read_;
@@ -1322,7 +1353,7 @@ auto SceneRenderer::Render() -> void {
   line_gizmo_vertex_data_buffer_.Resize(static_cast<int>(std::ssize(frame_packet.line_gizmo_vertex_data)));
   std::ranges::copy(frame_packet.line_gizmo_vertex_data, std::begin(line_gizmo_vertex_data_buffer_.GetData()));
 
-  // Transitions render targets and dispatches skinning
+  // Transitions render targets, dispatches skinning, and draws irradiance map
   auto& prepare_cmd{render_manager_->AcquireCommandList()};
   prepare_cmd.Begin(nullptr);
 
@@ -1472,6 +1503,81 @@ auto SceneRenderer::Render() -> void {
     prepare_cmd.Dispatch(
       static_cast<UINT>(std::ceil(static_cast<float>(mesh_data.vtx_count) / static_cast<float>(SKINNING_CS_THREADS))),
       1, 1);
+  }
+
+  // Draw irradiance map
+  if (frame_packet.draw_irradiance_map) {
+    auto const cube_mesh{App::Instance().GetResourceManager().GetCubeMesh()};
+
+    prepare_cmd.SetPipelineState(*frame_packet.irradiance_pso);
+    prepare_cmd.SetPipelineParameter(PIPELINE_PARAM_INDEX(IrradianceDrawParams, pos_buf_idx),
+      cube_mesh->GetPositionBuffer()->GetShaderResource());
+    prepare_cmd.SetPipelineParameter(PIPELINE_PARAM_INDEX(IrradianceDrawParams, cubemap_idx),
+      frame_packet.skybox_cubemap->GetShaderResource());
+    prepare_cmd.SetPipelineParameter(PIPELINE_PARAM_INDEX(IrradianceDrawParams, samp_idx), samp_af16_clamp_.Get());
+    prepare_cmd.SetIndexBuffer(*cube_mesh->GetIndexBuffer(), cube_mesh->GetIndexFormat());
+
+    prepare_cmd.Barrier({}, {}, std::array{
+      graphics::TextureBarrier{
+        D3D12_BARRIER_SYNC_NONE, D3D12_BARRIER_SYNC_RENDER_TARGET, D3D12_BARRIER_ACCESS_NO_ACCESS,
+        D3D12_BARRIER_ACCESS_RENDER_TARGET, D3D12_BARRIER_LAYOUT_UNDEFINED, D3D12_BARRIER_LAYOUT_RENDER_TARGET,
+        frame_packet.irradiance_tex.get(), {0, 0}, D3D12_TEXTURE_BARRIER_FLAG_NONE
+      }
+    });
+
+    CD3DX12_VIEWPORT const irradiance_viewport{
+      0.0f, 0.0f, static_cast<float>(frame_packet.irradiance_tex->GetDesc().width),
+      static_cast<float>(frame_packet.irradiance_tex->GetDesc().height)
+    };
+
+    CD3DX12_RECT const irradiance_scissor{
+      0, 0, static_cast<LONG>(frame_packet.irradiance_tex->GetDesc().width),
+      static_cast<LONG>(frame_packet.irradiance_tex->GetDesc().height)
+    };
+
+    prepare_cmd.SetViewports(std::span{static_cast<D3D12_VIEWPORT const*>(&irradiance_viewport), 1});
+    prepare_cmd.SetScissorRects(std::span{static_cast<D3D12_RECT const*>(&irradiance_scissor), 1});
+
+    prepare_cmd.SetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    prepare_cmd.SetRenderTargets(std::span{frame_packet.irradiance_tex.get(), 1}, nullptr);
+    prepare_cmd.ClearRenderTarget(*frame_packet.irradiance_tex, std::array{0.0f, 0.0f, 0.0f, 1.0f}, {});
+
+    for (auto face_idx{0}; face_idx < 6; face_idx++) {
+      auto const static global_cube_face_view_proj_matrices{
+        [] {
+          auto const proj_mtx{
+            TransformProjectionMatrixForRendering(Matrix4::PerspectiveFov(ToRadians(90), 1, 0.1f, 2.0f))
+          };
+
+          auto matrices{MakeCubeFaceViewMatrices(Vector3::Zero())};
+
+          for (auto& view_mtx : matrices) {
+            view_mtx *= proj_mtx;
+          }
+
+          return matrices;
+        }()
+      };
+
+      prepare_cmd.SetPipelineParameters(PIPELINE_PARAM_INDEX(IrradianceDrawParams, view_proj_mtx),
+        std::span{std::bit_cast<UINT const*>(global_cube_face_view_proj_matrices[face_idx].GetData()), 16});
+      prepare_cmd.SetPipelineParameter(PIPELINE_PARAM_INDEX(IrradianceDrawParams, rt_array_idx),
+        static_cast<UINT>(face_idx));
+
+      prepare_cmd.DrawIndexedInstanced(
+        static_cast<UINT>(App::Instance().GetResourceManager().GetCubeMesh()->GetIndexCount()),
+        1, 0, 0, 0);
+    }
+
+    prepare_cmd.Barrier({}, {}, std::array{
+      graphics::TextureBarrier{
+        D3D12_BARRIER_SYNC_RENDER_TARGET, D3D12_BARRIER_SYNC_NONE, D3D12_BARRIER_ACCESS_RENDER_TARGET,
+        D3D12_BARRIER_ACCESS_NO_ACCESS, D3D12_BARRIER_LAYOUT_RENDER_TARGET,
+        D3D12_BARRIER_LAYOUT_SHADER_RESOURCE,
+        frame_packet.irradiance_tex.get(), {0, 0}, D3D12_TEXTURE_BARRIER_FLAG_NONE
+      }
+    });
   }
 
   prepare_cmd.End();
@@ -1971,7 +2077,8 @@ auto SceneRenderer::Render() -> void {
       cam_cmd.SetPipelineParameter(PIPELINE_PARAM_INDEX(SkyboxDrawParams, per_view_cb_idx),
         cam_per_view_cb.GetBuffer()->GetConstantBuffer());
       cam_cmd.SetPipelineParameter(PIPELINE_PARAM_INDEX(SkyboxDrawParams, cubemap_idx),
-        frame_packet.skybox_cubemap->GetShaderResource());
+        //frame_packet.skybox_cubemap->GetShaderResource());
+        frame_packet.irradiance_tex->GetShaderResource());
       cam_cmd.SetPipelineParameter(PIPELINE_PARAM_INDEX(SkyboxDrawParams, samp_idx), samp_af16_clamp_.Get());
       cam_cmd.SetIndexBuffer(*cube_mesh->GetIndexBuffer(), cube_mesh->GetIndexFormat());
       cam_cmd.DrawIndexedInstanced(

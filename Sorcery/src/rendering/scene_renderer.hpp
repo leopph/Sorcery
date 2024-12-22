@@ -286,12 +286,14 @@ private:
     std::array<float, 4> background_color;
 
     graphics::SharedDeviceChildHandle<graphics::Texture> skybox_cubemap;
+    graphics::SharedDeviceChildHandle<graphics::Texture> irradiance_tex;
 
     Vector3 ambient_light;
 
     graphics::SharedDeviceChildHandle<graphics::PipelineState> shadow_pso;
     graphics::SharedDeviceChildHandle<graphics::PipelineState> depth_normal_pso;
     graphics::SharedDeviceChildHandle<graphics::PipelineState> depth_resolve_pso;
+    graphics::SharedDeviceChildHandle<graphics::PipelineState> irradiance_pso;
     graphics::SharedDeviceChildHandle<graphics::PipelineState> line_gizmo_pso;
     graphics::SharedDeviceChildHandle<graphics::PipelineState> object_pso_depth_write;
     graphics::SharedDeviceChildHandle<graphics::PipelineState> object_pso_depth_read;
@@ -299,6 +301,8 @@ private:
     graphics::SharedDeviceChildHandle<graphics::PipelineState> skybox_pso;
     graphics::SharedDeviceChildHandle<graphics::PipelineState> ssao_pso;
     graphics::SharedDeviceChildHandle<graphics::PipelineState> ssao_blur_pso;
+
+    bool draw_irradiance_map;
   };
 
 
@@ -356,6 +360,7 @@ private:
   static DXGI_FORMAT constexpr render_target_format_{DXGI_FORMAT_R8G8B8A8_UNORM};
   static DXGI_FORMAT constexpr ssao_buffer_format_{DXGI_FORMAT_R8_UNORM};
   static DXGI_FORMAT constexpr normal_buffer_format_{DXGI_FORMAT_R8G8B8A8_SNORM};
+  static DXGI_FORMAT constexpr irradiance_map_format_{DXGI_FORMAT_R16G16B16A16_FLOAT};
 
   ObserverPtr<RenderManager> render_manager_;
   ObserverPtr<Window> window_;
@@ -373,6 +378,7 @@ private:
   graphics::SharedDeviceChildHandle<graphics::PipelineState> shadow_pso_;
   graphics::SharedDeviceChildHandle<graphics::PipelineState> depth_normal_pso_;
   graphics::SharedDeviceChildHandle<graphics::PipelineState> depth_resolve_pso_;
+  graphics::SharedDeviceChildHandle<graphics::PipelineState> irradiance_pso_;
   graphics::SharedDeviceChildHandle<graphics::PipelineState> line_gizmo_pso_;
   graphics::SharedDeviceChildHandle<graphics::PipelineState> object_pso_depth_write_;
   graphics::SharedDeviceChildHandle<graphics::PipelineState> object_pso_depth_read_;
@@ -437,6 +443,9 @@ private:
   std::shared_ptr<RenderTarget> rt_override_;
 
   EventListenerHandle<Extent2D<unsigned>> window_size_event_listener_{};
+
+  std::unique_ptr<RenderTarget> irradiance_rt_;
+  Guid irradiance_src_guid_;
 };
 
 
