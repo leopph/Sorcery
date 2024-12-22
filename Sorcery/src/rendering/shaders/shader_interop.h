@@ -286,6 +286,15 @@ struct VertexSkinningDrawParams {
 };
 
 
+struct IrradianceDrawParams {
+  row_major float4x4 view_proj_mtx;
+  uint pos_buf_idx;
+  uint cubemap_idx;
+  uint samp_idx;
+  uint rt_array_idx;
+};
+
+
 #ifdef __cplusplus
 } // namespace sorcery
 #endif

@@ -366,6 +366,7 @@
       <Filter>Header Files</Filter>
     </None>
     <None Include="packages.config" />
+    <None Include="src\rendering\shaders\irradiance.hlsli" />
   </ItemGroup>
   <ItemGroup>
     <FxCompile Include="src\rendering\shaders\post_process_ps.hlsl" />
@@ -385,5 +386,7 @@
     <FxCompile Include="src\rendering\shaders\object_pbr_ps.hlsl" />
     <FxCompile Include="src\rendering\shaders\ssao_vs.hlsl" />
     <FxCompile Include="src\rendering\shaders\vtx_skinning_cs.hlsl" />
+    <FxCompile Include="src\rendering\shaders\irradiance_vs.hlsl" />
+    <FxCompile Include="src\rendering\shaders\irradiance_ps.hlsl" />
   </ItemGroup>
 </Project>
